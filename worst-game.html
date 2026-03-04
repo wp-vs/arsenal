@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Worst Game In The World</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: #1a1a1a;
+    color: #e0e0e0;
+    font-family: 'Courier New', monospace;
+    gap: 30px;
+    padding: 40px 20px;
+  }
+
+  h1 {
+    font-size: 1.6rem;
+    text-transform: uppercase;
+    letter-spacing: 3px;
+    color: #888;
+  }
+
+  #name-input {
+    padding: 10px 16px;
+    font-size: 1.1rem;
+    font-family: inherit;
+    background: #2a2a2a;
+    border: 2px solid #444;
+    color: #e0e0e0;
+    border-radius: 4px;
+    text-align: center;
+    width: 260px;
+  }
+
+  #name-input:focus {
+    outline: none;
+    border-color: #888;
+  }
+
+  #the-button {
+    width: 180px;
+    height: 180px;
+    border-radius: 50%;
+    border: none;
+    background: radial-gradient(circle at 35% 35%, #ff4444, #aa0000);
+    box-shadow: 0 8px 24px rgba(200, 0, 0, 0.5), inset 0 -4px 8px rgba(0,0,0,0.3);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 1rem;
+    font-weight: bold;
+    color: #fff;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    transition: transform 0.1s, box-shadow 0.1s;
+    user-select: none;
+  }
+
+  #the-button:hover:not(:disabled) {
+    transform: scale(1.05);
+    box-shadow: 0 10px 30px rgba(200, 0, 0, 0.7), inset 0 -4px 8px rgba(0,0,0,0.3);
+  }
+
+  #the-button:active:not(:disabled) {
+    transform: scale(0.96);
+    box-shadow: 0 4px 12px rgba(200, 0, 0, 0.4), inset 0 4px 8px rgba(0,0,0,0.4);
+  }
+
+  #the-button:disabled {
+    background: radial-gradient(circle at 35% 35%, #664444, #442222);
+    box-shadow: 0 4px 12px rgba(100, 0, 0, 0.3), inset 0 -4px 8px rgba(0,0,0,0.3);
+    cursor: not-allowed;
+    color: #886666;
+  }
+
+  #message {
+    min-height: 60px;
+    text-align: center;
+    font-size: 1.1rem;
+    line-height: 1.6;
+    max-width: 400px;
+  }
+
+  #message .score-value {
+    font-size: 2rem;
+    font-weight: bold;
+    color: #ff6666;
+    display: block;
+    margin-top: 6px;
+  }
+
+  #message .new-high {
+    color: #ffcc00;
+    font-weight: bold;
+  }
+
+  #cooldown-timer {
+    font-size: 0.9rem;
+    color: #666;
+    min-height: 1.2em;
+  }
+
+  h2 {
+    font-size: 1.1rem;
+    color: #888;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-top: 10px;
+  }
+
+  table {
+    border-collapse: collapse;
+    min-width: 320px;
+  }
+
+  th, td {
+    padding: 8px 18px;
+    text-align: left;
+    border-bottom: 1px solid #333;
+  }
+
+  th {
+    color: #888;
+    font-weight: normal;
+    text-transform: uppercase;
+    font-size: 0.8rem;
+    letter-spacing: 1px;
+  }
+
+  td {
+    font-size: 0.95rem;
+  }
+
+  td:last-child {
+    text-align: right;
+    color: #ff6666;
+    font-weight: bold;
+  }
+
+  #no-scores {
+    color: #555;
+    font-style: italic;
+    font-size: 0.9rem;
+  }
+</style>
+</head>
+<body>
+
+<h1>The Worst Game In The World</h1>
+
+<input type="text" id="name-input" placeholder="Enter your name" maxlength="30" autocomplete="off">
+
+<button id="the-button">Press Me</button>
+
+<div id="cooldown-timer"></div>
+<div id="message"></div>
+
+<h2>High Scores</h2>
+<table id="high-score-table">
+  <thead>
+    <tr><th>#</th><th>Name</th><th>Score</th></tr>
+  </thead>
+  <tbody id="high-score-body"></tbody>
+</table>
+<div id="no-scores">No scores yet. Be the first.</div>
+
+<script>
+(function () {
+  const COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+  const STORAGE_SCORES = 'worst_game_high_scores';
+  const STORAGE_COOLDOWNS = 'worst_game_cooldowns';
+
+  const nameInput = document.getElementById('name-input');
+  const button = document.getElementById('the-button');
+  const messageEl = document.getElementById('message');
+  const cooldownEl = document.getElementById('cooldown-timer');
+  const scoreBody = document.getElementById('high-score-body');
+  const noScoresEl = document.getElementById('no-scores');
+
+  let cooldownInterval = null;
+
+  // --- Lognormal distribution ---
+  // We want a lognormal with the given *actual* mean and std dev.
+  // If X ~ Lognormal(mu, sigma), then:
+  //   E[X] = exp(mu + sigma^2/2)
+  //   Var[X] = (exp(sigma^2) - 1) * exp(2*mu + sigma^2)
+  // Given desired mean M=100 and std S=50:
+  //   sigma^2 = ln(1 + (S/M)^2)
+  //   mu = ln(M) - sigma^2/2
+  function lognormalSample(mean, std) {
+    const variance = std * std;
+    const sigma2 = Math.log(1 + variance / (mean * mean));
+    const mu = Math.log(mean) - sigma2 / 2;
+    const sigma = Math.sqrt(sigma2);
+
+    // Box-Muller transform for standard normal
+    const u1 = Math.random();
+    const u2 = Math.random();
+    const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+
+    return Math.exp(mu + sigma * z);
+  }
+
+  // --- LocalStorage helpers ---
+  function getHighScores() {
+    try {
+      return JSON.parse(localStorage.getItem(STORAGE_SCORES)) || {};
+    } catch { return {}; }
+  }
+
+  function saveHighScores(scores) {
+    localStorage.setItem(STORAGE_SCORES, JSON.stringify(scores));
+  }
+
+  function getCooldowns() {
+    try {
+      return JSON.parse(localStorage.getItem(STORAGE_COOLDOWNS)) || {};
+    } catch { return {}; }
+  }
+
+  function saveCooldowns(cooldowns) {
+    localStorage.setItem(STORAGE_COOLDOWNS, JSON.stringify(cooldowns));
+  }
+
+  // --- Render high score table ---
+  function renderScores() {
+    const scores = getHighScores();
+    const sorted = Object.entries(scores)
+      .sort((a, b) => b[1] - a[1]);
+
+    scoreBody.innerHTML = '';
+    noScoresEl.style.display = sorted.length ? 'none' : 'block';
+
+    sorted.forEach(([name, score], i) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td>' + (i + 1) + '</td>' +
+        '<td>' + escapeHtml(name) + '</td>' +
+        '<td>' + score.toFixed(2) + '</td>';
+      scoreBody.appendChild(tr);
+    });
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  // --- Cooldown display ---
+  function updateCooldownDisplay() {
+    const name = nameInput.value.trim().toLowerCase();
+    if (!name) {
+      cooldownEl.textContent = '';
+      button.disabled = false;
+      return;
+    }
+
+    const cooldowns = getCooldowns();
+    const lastPress = cooldowns[name];
+    if (!lastPress) {
+      cooldownEl.textContent = '';
+      button.disabled = false;
+      return;
+    }
+
+    const elapsed = Date.now() - lastPress;
+    const remaining = COOLDOWN_MS - elapsed;
+
+    if (remaining <= 0) {
+      cooldownEl.textContent = '';
+      button.disabled = false;
+      return;
+    }
+
+    button.disabled = true;
+    const mins = Math.floor(remaining / 60000);
+    const secs = Math.floor((remaining % 60000) / 1000);
+    cooldownEl.textContent = name + ' can press again in ' + mins + 'm ' + secs + 's';
+  }
+
+  function startCooldownTimer() {
+    if (cooldownInterval) clearInterval(cooldownInterval);
+    cooldownInterval = setInterval(updateCooldownDisplay, 1000);
+    updateCooldownDisplay();
+  }
+
+  // --- Button click ---
+  button.addEventListener('click', function () {
+    const name = nameInput.value.trim();
+    if (!name) {
+      messageEl.innerHTML = 'Please enter your name first.';
+      return;
+    }
+
+    const key = name.toLowerCase();
+    const cooldowns = getCooldowns();
+    const lastPress = cooldowns[key];
+
+    if (lastPress && (Date.now() - lastPress) < COOLDOWN_MS) {
+      updateCooldownDisplay();
+      messageEl.innerHTML = 'Patience, <b>' + escapeHtml(name) + '</b>. You must wait.';
+      return;
+    }
+
+    // Generate score
+    const score = lognormalSample(100, 50);
+
+    // Record cooldown
+    cooldowns[key] = Date.now();
+    saveCooldowns(cooldowns);
+
+    // Update high score
+    const scores = getHighScores();
+    const isNewHigh = !scores[key] || score > scores[key];
+    if (isNewHigh) {
+      scores[key] = score;
+      saveHighScores(scores);
+    }
+
+    // Display result
+    let html = escapeHtml(name) + ' scored:<span class="score-value">' + score.toFixed(2) + '</span>';
+    if (isNewHigh && Object.keys(scores).length > 0) {
+      html += '<span class="new-high">New personal best!</span>';
+    }
+    messageEl.innerHTML = html;
+
+    renderScores();
+    startCooldownTimer();
+  });
+
+  nameInput.addEventListener('input', function () {
+    messageEl.innerHTML = '';
+    updateCooldownDisplay();
+  });
+
+  // --- Init ---
+  renderScores();
+  startCooldownTimer();
+})();
+</script>
+
+</body>
+</html>
