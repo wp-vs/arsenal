@@ -27,6 +27,12 @@
     color: #888;
   }
 
+  #utc-clock {
+    font-size: 1.3rem;
+    color: #aaa;
+    letter-spacing: 2px;
+  }
+
   #name-input {
     padding: 10px 16px;
     font-size: 1.1rem;
@@ -100,7 +106,7 @@
     font-weight: bold;
   }
 
-  #cooldown-timer {
+  #status-msg {
     font-size: 0.9rem;
     color: #666;
     min-height: 1.2em;
@@ -116,11 +122,11 @@
 
   table {
     border-collapse: collapse;
-    min-width: 320px;
+    min-width: 460px;
   }
 
   th, td {
-    padding: 8px 18px;
+    padding: 8px 14px;
     text-align: left;
     border-bottom: 1px solid #333;
   }
@@ -137,10 +143,15 @@
     font-size: 0.95rem;
   }
 
-  td:last-child {
+  td.score-col {
     text-align: right;
     color: #ff6666;
     font-weight: bold;
+  }
+
+  td.time-col {
+    color: #777;
+    font-size: 0.85rem;
   }
 
   #no-scores {
@@ -148,23 +159,29 @@
     font-style: italic;
     font-size: 0.9rem;
   }
+
+  @media (max-width: 520px) {
+    table { min-width: unset; width: 100%; }
+    th, td { padding: 6px 8px; font-size: 0.82rem; }
+  }
 </style>
 </head>
 <body>
 
 <h1>The Worst Game In The World</h1>
+<div id="utc-clock"></div>
 
 <input type="text" id="name-input" placeholder="Enter your name" maxlength="30" autocomplete="off">
 
 <button id="the-button">Press Me</button>
 
-<div id="cooldown-timer"></div>
+<div id="status-msg"></div>
 <div id="message"></div>
 
 <h2>High Scores</h2>
 <table id="high-score-table">
   <thead>
-    <tr><th>#</th><th>Name</th><th>Score</th></tr>
+    <tr><th>#</th><th>Name</th><th>Score</th><th>Last Pressed (UTC)</th></tr>
   </thead>
   <tbody id="high-score-body"></tbody>
 </table>
@@ -172,77 +189,82 @@
 
 <script>
 (function () {
-  const COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
-  const STORAGE_SCORES = 'worst_game_high_scores';
-  const STORAGE_COOLDOWNS = 'worst_game_cooldowns';
+  const STORAGE_KEY = 'worst_game_data';
+  // Tracks which names THIS device has already used
+  const STORAGE_DEVICE = 'worst_game_device_used';
 
   const nameInput = document.getElementById('name-input');
   const button = document.getElementById('the-button');
   const messageEl = document.getElementById('message');
-  const cooldownEl = document.getElementById('cooldown-timer');
+  const statusEl = document.getElementById('status-msg');
+  const clockEl = document.getElementById('utc-clock');
   const scoreBody = document.getElementById('high-score-body');
   const noScoresEl = document.getElementById('no-scores');
 
-  let cooldownInterval = null;
+  // --- UTC clock ---
+  function updateClock() {
+    const now = new Date();
+    clockEl.textContent = now.toISOString().replace('T', '  ').replace(/\.\d+Z$/, ' UTC');
+  }
+  setInterval(updateClock, 1000);
+  updateClock();
 
   // --- Lognormal distribution ---
-  // We want a lognormal with the given *actual* mean and std dev.
-  // If X ~ Lognormal(mu, sigma), then:
-  //   E[X] = exp(mu + sigma^2/2)
-  //   Var[X] = (exp(sigma^2) - 1) * exp(2*mu + sigma^2)
-  // Given desired mean M=100 and std S=50:
-  //   sigma^2 = ln(1 + (S/M)^2)
-  //   mu = ln(M) - sigma^2/2
   function lognormalSample(mean, std) {
     const variance = std * std;
     const sigma2 = Math.log(1 + variance / (mean * mean));
     const mu = Math.log(mean) - sigma2 / 2;
     const sigma = Math.sqrt(sigma2);
-
-    // Box-Muller transform for standard normal
     const u1 = Math.random();
     const u2 = Math.random();
     const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-
     return Math.exp(mu + sigma * z);
   }
 
-  // --- LocalStorage helpers ---
-  function getHighScores() {
-    try {
-      return JSON.parse(localStorage.getItem(STORAGE_SCORES)) || {};
-    } catch { return {}; }
+  // --- Storage helpers ---
+  // Game data: { [nameLower]: { name, score, lastPressed } }
+  function getData() {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; }
+    catch { return {}; }
+  }
+  function saveData(data) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
   }
 
-  function saveHighScores(scores) {
-    localStorage.setItem(STORAGE_SCORES, JSON.stringify(scores));
+  // Device tracking: Set of lowercase names this device has pressed for
+  function getDeviceUsed() {
+    try { return JSON.parse(localStorage.getItem(STORAGE_DEVICE)) || []; }
+    catch { return []; }
   }
-
-  function getCooldowns() {
-    try {
-      return JSON.parse(localStorage.getItem(STORAGE_COOLDOWNS)) || {};
-    } catch { return {}; }
+  function markDeviceUsed(key) {
+    const used = getDeviceUsed();
+    if (!used.includes(key)) {
+      used.push(key);
+      localStorage.setItem(STORAGE_DEVICE, JSON.stringify(used));
+    }
   }
-
-  function saveCooldowns(cooldowns) {
-    localStorage.setItem(STORAGE_COOLDOWNS, JSON.stringify(cooldowns));
+  function hasDeviceUsed(key) {
+    return getDeviceUsed().includes(key);
   }
 
   // --- Render high score table ---
   function renderScores() {
-    const scores = getHighScores();
-    const sorted = Object.entries(scores)
-      .sort((a, b) => b[1] - a[1]);
+    const data = getData();
+    const sorted = Object.values(data)
+      .sort((a, b) => b.score - a.score);
 
     scoreBody.innerHTML = '';
     noScoresEl.style.display = sorted.length ? 'none' : 'block';
 
-    sorted.forEach(([name, score], i) => {
+    sorted.forEach(function (entry, i) {
       const tr = document.createElement('tr');
+      const pressedDate = new Date(entry.lastPressed);
+      const timeStr = pressedDate.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
       tr.innerHTML =
         '<td>' + (i + 1) + '</td>' +
-        '<td>' + escapeHtml(name) + '</td>' +
-        '<td>' + score.toFixed(2) + '</td>';
+        '<td>' + escapeHtml(entry.name) + '</td>' +
+        '<td class="score-col">' + entry.score.toFixed(2) + '</td>' +
+        '<td class="time-col">' + timeStr + '</td>';
       scoreBody.appendChild(tr);
     });
   }
@@ -253,42 +275,21 @@
     return div.innerHTML;
   }
 
-  // --- Cooldown display ---
-  function updateCooldownDisplay() {
+  // --- Update button state based on current name ---
+  function updateButtonState() {
     const name = nameInput.value.trim().toLowerCase();
     if (!name) {
-      cooldownEl.textContent = '';
+      statusEl.textContent = '';
       button.disabled = false;
       return;
     }
-
-    const cooldowns = getCooldowns();
-    const lastPress = cooldowns[name];
-    if (!lastPress) {
-      cooldownEl.textContent = '';
+    if (hasDeviceUsed(name)) {
+      button.disabled = true;
+      statusEl.textContent = '"' + nameInput.value.trim() + '" has already pressed the button on this device.';
+    } else {
       button.disabled = false;
-      return;
+      statusEl.textContent = '';
     }
-
-    const elapsed = Date.now() - lastPress;
-    const remaining = COOLDOWN_MS - elapsed;
-
-    if (remaining <= 0) {
-      cooldownEl.textContent = '';
-      button.disabled = false;
-      return;
-    }
-
-    button.disabled = true;
-    const mins = Math.floor(remaining / 60000);
-    const secs = Math.floor((remaining % 60000) / 1000);
-    cooldownEl.textContent = name + ' can press again in ' + mins + 'm ' + secs + 's';
-  }
-
-  function startCooldownTimer() {
-    if (cooldownInterval) clearInterval(cooldownInterval);
-    cooldownInterval = setInterval(updateCooldownDisplay, 1000);
-    updateCooldownDisplay();
   }
 
   // --- Button click ---
@@ -300,49 +301,51 @@
     }
 
     const key = name.toLowerCase();
-    const cooldowns = getCooldowns();
-    const lastPress = cooldowns[key];
 
-    if (lastPress && (Date.now() - lastPress) < COOLDOWN_MS) {
-      updateCooldownDisplay();
-      messageEl.innerHTML = 'Patience, <b>' + escapeHtml(name) + '</b>. You must wait.';
+    if (hasDeviceUsed(key)) {
+      updateButtonState();
+      messageEl.innerHTML = 'You already pressed the button as <b>' + escapeHtml(name) + '</b> on this device.';
       return;
     }
 
     // Generate score
     const score = lognormalSample(100, 50);
+    const now = Date.now();
 
-    // Record cooldown
-    cooldowns[key] = Date.now();
-    saveCooldowns(cooldowns);
+    // Mark this name as used on this device
+    markDeviceUsed(key);
 
-    // Update high score
-    const scores = getHighScores();
-    const isNewHigh = !scores[key] || score > scores[key];
+    // Update game data (keep highest score)
+    const data = getData();
+    const existing = data[key];
+    const isNewHigh = !existing || score > existing.score;
+
     if (isNewHigh) {
-      scores[key] = score;
-      saveHighScores(scores);
+      data[key] = { name: name, score: score, lastPressed: now };
+    } else {
+      data[key].lastPressed = now;
     }
+    saveData(data);
 
     // Display result
     let html = escapeHtml(name) + ' scored:<span class="score-value">' + score.toFixed(2) + '</span>';
-    if (isNewHigh && Object.keys(scores).length > 0) {
+    if (isNewHigh) {
       html += '<span class="new-high">New personal best!</span>';
     }
     messageEl.innerHTML = html;
 
     renderScores();
-    startCooldownTimer();
+    updateButtonState();
   });
 
   nameInput.addEventListener('input', function () {
     messageEl.innerHTML = '';
-    updateCooldownDisplay();
+    updateButtonState();
   });
 
   // --- Init ---
   renderScores();
-  startCooldownTimer();
+  updateButtonState();
 })();
 </script>
 
