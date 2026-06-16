@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>World Cup Group Winner Odds</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    min-height: 100vh;
+    background: #1a1a1a;
+    color: #e0e0e0;
+    font-family: 'Courier New', monospace;
+    padding: 40px 20px 80px;
+  }
+
+  .wrap {
+    max-width: 960px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 24px;
+  }
+
+  h1 {
+    font-size: 1.6rem;
+    text-transform: uppercase;
+    letter-spacing: 3px;
+    color: #888;
+    text-align: center;
+  }
+
+  .subtitle {
+    font-size: 0.85rem;
+    color: #666;
+    text-align: center;
+    line-height: 1.6;
+  }
+
+  .subtitle a { color: #888; }
+
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  button#refresh {
+    padding: 10px 22px;
+    font-family: inherit;
+    font-size: 0.95rem;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: #fff;
+    background: radial-gradient(circle at 35% 35%, #ff4444, #aa0000);
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    box-shadow: 0 6px 18px rgba(200, 0, 0, 0.4);
+    transition: transform 0.1s, box-shadow 0.1s;
+  }
+  button#refresh:hover:not(:disabled) { transform: scale(1.04); }
+  button#refresh:active:not(:disabled) { transform: scale(0.97); }
+  button#refresh:disabled { background: radial-gradient(circle at 35% 35%, #664444, #442222); cursor: not-allowed; color: #886666; }
+
+  #status { font-size: 0.85rem; color: #777; min-height: 1.2em; text-align: center; }
+
+  .groups {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 18px;
+    width: 100%;
+  }
+
+  .group {
+    background: #222;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 16px 18px;
+  }
+
+  .group h2 {
+    font-size: 1rem;
+    color: #aaa;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 4px;
+  }
+
+  .group .vol { font-size: 0.72rem; color: #555; margin-bottom: 12px; }
+
+  .team {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 4px 10px;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+
+  .team-name { font-size: 0.9rem; color: #ddd; }
+  .team-pct { font-size: 0.95rem; font-weight: bold; color: #ff6666; text-align: right; }
+
+  .bar {
+    grid-column: 1 / -1;
+    height: 6px;
+    background: #2e2e2e;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .bar > span {
+    display: block;
+    height: 100%;
+    background: linear-gradient(90deg, #aa0000, #ff6666);
+    border-radius: 3px;
+    transition: width 0.4s;
+  }
+
+  .team.leader .team-pct { color: #ffcc00; }
+  .team.leader .bar > span { background: linear-gradient(90deg, #aa8800, #ffcc00); }
+
+  .group.error { border-color: #553333; }
+  .group .err-msg { font-size: 0.8rem; color: #aa6666; font-style: italic; }
+
+  .skeleton { color: #555; font-style: italic; font-size: 0.85rem; }
+
+  @media (max-width: 520px) {
+    .groups { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>World Cup Group Winner Odds</h1>
+  <div class="subtitle">
+    Live probabilities (implied by current prices) for each team to finish first in their group,<br>
+    sourced from the <a href="https://polymarket.com/event/world-cup-group-a-winner" target="_blank" rel="noopener">Polymarket</a> prediction markets via the public Gamma API.
+  </div>
+
+  <div class="controls">
+    <button id="refresh">Refresh</button>
+    <span id="status"></span>
+  </div>
+
+  <div class="groups" id="groups"></div>
+</div>
+
+<script>
+(function () {
+  // ---- Config ----------------------------------------------------------------
+  const GAMMA_BASE = 'https://gamma-api.polymarket.com';
+  // World Cup 2026 has 12 groups, A through L. Each is a Polymarket event whose
+  // slug follows this pattern; each event holds one Yes/No market per team.
+  const GROUP_LETTERS = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l'];
+  const groupSlug = (letter) => `world-cup-group-${letter}-winner`;
+
+  const groupsEl = document.getElementById('groups');
+  const statusEl = document.getElementById('status');
+  const refreshBtn = document.getElementById('refresh');
+
+  // ---- Data fetching ---------------------------------------------------------
+
+  // Some fields (outcomes, outcomePrices, clobTokenIds) come back from Gamma as
+  // JSON-encoded strings. Parse defensively.
+  function parseMaybeJson(value, fallback) {
+    if (Array.isArray(value)) return value;
+    if (typeof value !== 'string') return fallback;
+    try { return JSON.parse(value); } catch { return fallback; }
+  }
+
+  // Turn one Polymarket event into a normalised list of { team, prob }.
+  // Group-winner events are "neg risk" markets: one binary market per team,
+  // where the "Yes" price is the probability that team wins the group. We also
+  // handle the case of a single multi-outcome market just in case.
+  function extractTeams(event) {
+    const teams = [];
+    const markets = (event && event.markets) || [];
+
+    for (const market of markets) {
+      const outcomes = parseMaybeJson(market.outcomes, []);
+      const prices = parseMaybeJson(market.outcomePrices, []);
+
+      const yesIndex = outcomes.findIndex((o) => String(o).toLowerCase() === 'yes');
+
+      if (yesIndex !== -1 && outcomes.length <= 2) {
+        // One binary market = one team.
+        const name = market.groupItemTitle || market.question || 'Unknown';
+        const prob = parseFloat(prices[yesIndex]);
+        if (!Number.isNaN(prob)) teams.push({ team: name, prob });
+      } else {
+        // Fallback: a single market listing every team as an outcome.
+        outcomes.forEach((name, i) => {
+          const prob = parseFloat(prices[i]);
+          if (!Number.isNaN(prob)) teams.push({ team: String(name), prob });
+        });
+      }
+    }
+
+    teams.sort((a, b) => b.prob - a.prob);
+    return teams;
+  }
+
+  // Fetch a single group's odds. Returns { letter, title, teams, volume } or
+  // throws / returns an error marker we can render.
+  async function fetchGroupOdds(letter) {
+    const url = `${GAMMA_BASE}/events?slug=${encodeURIComponent(groupSlug(letter))}`;
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const data = await res.json();
+    const event = Array.isArray(data) ? data[0] : data;
+    if (!event) throw new Error('market not found');
+
+    return {
+      letter,
+      title: event.title || `Group ${letter.toUpperCase()} Winner`,
+      teams: extractTeams(event),
+      volume: Number(event.volume) || 0,
+    };
+  }
+
+  // ---- Rendering -------------------------------------------------------------
+
+  const pct = (p) => (p * 100).toFixed(1) + '%';
+
+  function fmtVolume(v) {
+    if (!v) return '';
+    if (v >= 1e6) return '$' + (v / 1e6).toFixed(1) + 'M volume';
+    if (v >= 1e3) return '$' + (v / 1e3).toFixed(0) + 'K volume';
+    return '$' + v.toFixed(0) + ' volume';
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  function renderSkeletons() {
+    groupsEl.innerHTML = '';
+    GROUP_LETTERS.forEach((letter) => {
+      const card = document.createElement('div');
+      card.className = 'group';
+      card.id = 'group-' + letter;
+      card.innerHTML =
+        '<h2>Group ' + letter.toUpperCase() + '</h2>' +
+        '<div class="skeleton">Loading…</div>';
+      groupsEl.appendChild(card);
+    });
+  }
+
+  function renderGroup(result) {
+    const card = document.getElementById('group-' + result.letter);
+    if (!card) return;
+    card.className = 'group';
+
+    const rows = result.teams.map((t, i) => {
+      const width = Math.max(0, Math.min(100, t.prob * 100));
+      const leader = i === 0 ? ' leader' : '';
+      return (
+        '<div class="team' + leader + '">' +
+          '<span class="team-name">' + escapeHtml(t.team) + '</span>' +
+          '<span class="team-pct">' + pct(t.prob) + '</span>' +
+          '<span class="bar"><span style="width:' + width.toFixed(1) + '%"></span></span>' +
+        '</div>'
+      );
+    }).join('');
+
+    card.innerHTML =
+      '<h2>' + escapeHtml(result.title.replace(/ Winner$/i, '')) + '</h2>' +
+      (result.volume ? '<div class="vol">' + fmtVolume(result.volume) + '</div>' : '') +
+      (rows || '<div class="err-msg">No prices available yet.</div>');
+  }
+
+  function renderError(letter, message) {
+    const card = document.getElementById('group-' + letter);
+    if (!card) return;
+    card.className = 'group error';
+    card.innerHTML =
+      '<h2>Group ' + letter.toUpperCase() + '</h2>' +
+      '<div class="err-msg">Could not load: ' + escapeHtml(message) + '</div>';
+  }
+
+  // ---- Orchestration ---------------------------------------------------------
+
+  async function loadAll() {
+    refreshBtn.disabled = true;
+    statusEl.textContent = 'Fetching live odds from Polymarket…';
+    renderSkeletons();
+
+    let ok = 0;
+    let failed = 0;
+
+    // Fetch every group in parallel; render each as soon as it resolves.
+    await Promise.all(GROUP_LETTERS.map(async (letter) => {
+      try {
+        const result = await fetchGroupOdds(letter);
+        renderGroup(result);
+        ok++;
+      } catch (err) {
+        renderError(letter, err.message || String(err));
+        failed++;
+      }
+    }));
+
+    const stamp = new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+    let msg = 'Updated ' + stamp + ' — ' + ok + '/' + GROUP_LETTERS.length + ' groups loaded.';
+    if (failed && ok === 0) {
+      msg += ' If everything failed, the market may be unavailable or your browser/network blocked the request (CORS).';
+    }
+    statusEl.textContent = msg;
+    refreshBtn.disabled = false;
+  }
+
+  refreshBtn.addEventListener('click', loadAll);
+  loadAll();
+})();
+</script>
+</body>
+</html>
